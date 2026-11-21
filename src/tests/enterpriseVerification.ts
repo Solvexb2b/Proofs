@@ -356,17 +356,29 @@ export async function runEnterpriseVerification() {
     }
   });
 
-  // 20. Crystal Clear Box Redacted Evidence Projection
-  runTest('Crystal Clear Box Redaction Preserves Verifiable Evidence', 'AUDIT', () => {
+  // 20. Crystal Clear Box never invents proof and fails closed on unsigned attestations.
+  runTest('Crystal Clear Box Rejects Missing and Untrusted Proof Bundles', 'AUDIT', () => {
     const engine = ProofEngine.getInstance();
-    const bundle = engine.getBundle('PB-DH-S-001');
-    if (!bundle) throw new Error('PB-DH-S-001 not found');
-    const customerView = CrystalClearBox.projectCustomerEvidence(bundle);
-    if (!customerView.proprietary_weights_redacted) throw new Error('Proprietary weights not marked redacted');
-    if (!customerView.internal_reasoning_redacted) throw new Error('Internal reasoning not marked redacted');
-    if (customerView.verification_verdict !== 'VERIFIED') throw new Error('Verification verdict missing or corrupt');
-    if (!customerView.public_audit_token || customerView.public_audit_token.length !== 64) {
-      throw new Error('Customer public audit token invalid');
+    let missingRejected = false;
+    try { CrystalClearBox.projectCustomerEvidence('DH-S-001'); } catch { missingRejected = true; }
+    if (!missingRejected) throw new Error('Missing DH-S-001 proof was converted into customer evidence');
+
+    for (const bundle of engine.getAllBundles()) {
+      const integrity = engine.verifyBundleIntegrity(bundle);
+      let projectionRejected = false;
+      try { CrystalClearBox.projectCustomerEvidence(bundle); } catch { projectionRejected = true; }
+      if (!integrity.verified && !projectionRejected) {
+        throw new Error(`Unverified proof bundle ${bundle.proof_id} was projected`);
+      }
+      if (integrity.verified) {
+        const view = CrystalClearBox.projectCustomerEvidence(bundle);
+        if (!view.proprietary_weights_redacted || !view.internal_reasoning_redacted) {
+          throw new Error('Private material was not marked redacted');
+        }
+        if (!/^[a-f0-9]{64}$/i.test(view.public_audit_token)) {
+          throw new Error('Public content digest is invalid');
+        }
+      }
     }
   });
 
