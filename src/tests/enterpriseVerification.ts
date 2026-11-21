@@ -234,28 +234,28 @@ export async function runEnterpriseVerification() {
   });
 
   // 12. Proof Bundle Builder & Attestation Sealing
-  runTest('Proof Bundle Builder Seal & Independent Oracle Attestation', 'PROOFS', async () => {
+  runTest('Proof Bundle Builder Requires Trusted Oracle Signatures', 'PROOFS', async () => {
     const z3Engine = Z3FormalProofEngine.getInstance();
     const z3Proof = await z3Engine.proveCatalogTheorem('THM-INDUCTIVE-TERMINATION-05');
     if (!z3Proof.proved || z3Proof.solver_result !== 'unsat') {
-      throw new Error(`Z3 proof execution failed: ${z3Proof.explanation}`);
+      throw new Error('Z3 proof execution failed: ' + z3Proof.explanation);
     }
-
+    const sameHash = computeSha256('same-replay-output');
     const builder = new ProofBundleBuilder('PB-TEST-SEAL', 'SUB-001', 'Test verifiable claim');
     builder
       .addTest('TEST-1', 'Basic assertion', true, 1.0)
       .addZ3Proof(z3Proof, true)
       .addOracle('ORACLE-01', 'Test Witness', 'SIG_CHECK', true)
-      .addReplay('REPLAY-01', 'hash_a', 'hash_a');
+      .addReplay('REPLAY-01', sameHash, sameHash)
+      .addSourceReference('test-fixture://PB-TEST-SEAL');
     const sealed = builder.seal();
-    if (sealed.verification_status !== 'VERIFIED') {
-      throw new Error('Clean proof bundle failed to seal as VERIFIED');
+    if (sealed.verification_status !== 'PARTIAL') {
+      throw new Error('Unsigned self-asserted oracle flag must not seal as VERIFIED');
     }
-
     const engine = ProofEngine.getInstance();
     const check = engine.verifyBundleIntegrity(sealed);
-    if (!check.verified) {
-      throw new Error(`Proof bundle failed integrity verification: ${check.reasons.join(', ')}`);
+    if (check.verified || !check.reasons.some(reason => reason.includes('Trusted-key oracle signature'))) {
+      throw new Error('Unsigned oracle flag was accepted as independent attestation');
     }
   });
 
@@ -351,20 +351,32 @@ export async function runEnterpriseVerification() {
     if (inventory.length < 3) throw new Error('Expected at least 3 external adapters cataloged');
     const pp = inventory.find(i => i.adapter_id === 'DN-35');
     if (!pp) throw new Error('DN-35 PayPal adapter missing from inventory');
-    if (pp.status === 'AVAILABLE' && (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET)) {
-      throw new Error('DN-35 falsely claimed AVAILABLE without credentials present');
-    }
-  });
-
-  // 20. Crystal Clear Box Redacted Evidence Projection
-  runTest('Crystal Clear Box Redaction Preserves Verifiable Evidence', 'AUDIT', () => {
+    if (pp.sta  // 20. Crystal Clear Box must never fabricate missing proof bundles.
+  runTest('Crystal Clear Box Rejects Missing and Unauthenticated Proofs', 'AUDIT', () => {
     const engine = ProofEngine.getInstance();
-    const bundle = engine.getBundle('PB-DH-S-001');
-    if (!bundle) throw new Error('PB-DH-S-001 not found');
-    const customerView = CrystalClearBox.projectCustomerEvidence(bundle);
-    if (!customerView.proprietary_weights_redacted) throw new Error('Proprietary weights not marked redacted');
-    if (!customerView.internal_reasoning_redacted) throw new Error('Internal reasoning not marked redacted');
-    if (customerView.verification_verdict !== 'VERIFIED') throw new Error('Verification verdict missing or corrupt');
+    const persisted = engine.getBundle('PB-DH-S-001');
+    if (persisted && engine.verifyBundleIntegrity(persisted).verified) {
+      throw new Error('Legacy self-asserted proof unexpectedly passed trusted verification');
+    }
+    let missingRejected = false;
+    try { CrystalClearBox.projectCustomerEvidence('DH-S-001'); } catch { missingRejected = true; }
+    if (!missingRejected) throw new Error('Crystal Clear Box fabricated customer evidence for a missing bundle');
+    const forged = {
+      proof_id: 'PB-FORGED', subject_id: 'DH-S-001', claim: 'forged claim',
+      claim_hash: computeSha256('forged claim'), evidence: [],
+      tests: [{ test_id: 't1', description: 'self-asserted', passed: true, duration_ms: 1, receipt_hash: computeSha256('t1:true:1') }],
+      formal_proofs: [{ system: 'Z3_SMT', specification: 'forged', checked: true, classification: 'MACHINE_CHECKED_MODEL_PROOF', proof_term_hash: computeSha256('Z3_SMT:forged:true:MACHINE_CHECKED_MODEL_PROOF:UNSAT'), solver_result: 'UNSAT' }],
+      independent_oracles: [{ oracle_id: 'o1', name: 'self', method: 'fake', attestation_hash: computeSha256('o1:self:fake'), verified: true }],
+      replay_results: [{ replay_id: 'r1', status: 'MATCH', expected_hash: computeSha256('x'), observed_hash: computeSha256('x') }],
+      implementation_hash: computeSha256('impl'), environment_hash: computeSha256('env'), dependency_hash: computeSha256('dep'),
+      source_references: ['untrusted://source'], timestamp: Date.now(), verifier_identity: 'untrusted',
+      verification_status: 'VERIFIED', limitations: [], reproducibility_instructions: 'private'
+    } as any;
+    let forgedRejected = false;
+    try { CrystalClearBox.projectCustomerEvidence(forged); } catch { forgedRejected = true; }
+    if (!forgedRejected) throw new Error('Unsigned fabricated proof was projected to a customer');
+  });
+dict missing or corrupt');
     if (!customerView.public_audit_token || customerView.public_audit_token.length !== 64) {
       throw new Error('Customer public audit token invalid');
     }
