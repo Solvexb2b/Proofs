@@ -252,9 +252,9 @@ export class DFRLEngine {
 
     // Determine status
     let status: DFRLResult['resolution_status'] = 'REJECTED_UNKNOWN';
-    let z3Hash = z3Result?.proof_hash || '0'.repeat(64);
+    let z3Hash = z3Result?.certificate_sha256 || '0'.repeat(64);
     let solverVersion = z3Result?.solver_version || 'Z3-Native-WASM';
-    let solverTime = z3Result?.time_taken_ms || 0;
+    let solverTime = z3Result?.execution_time_ms || 0;
     let measuredSteps = nopotCert?.actual_measured_steps || 0;
     let upperBound = nopotCert?.bounded_steps_upper_bound || 100;
     let explanation = '';
