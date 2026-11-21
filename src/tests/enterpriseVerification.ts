@@ -229,7 +229,7 @@ export async function runEnterpriseVerification() {
     const store = DurableStore.getInstance();
     const sol = store.getState().solutions['DH-S-001'];
     if (!sol) throw new Error('Preserved solution DH-S-001 missing from store');
-    if (sol.verification_status !== 'VERIFIED') throw new Error('DH-S-001 is not marked VERIFIED');
+    if (sol.verification_status !== 'PARTIAL') throw new Error('DH-S-001 must remain PARTIAL until a source-bound proof bundle verifies');
     if (!sol.reversibility_guaranteed) throw new Error('DH-S-001 must guarantee reversibility');
   });
 
