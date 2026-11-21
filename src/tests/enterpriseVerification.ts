@@ -233,30 +233,35 @@ export async function runEnterpriseVerification() {
     if (!sol.reversibility_guaranteed) throw new Error('DH-S-001 must guarantee reversibility');
   });
 
-  // 12. Proof Bundle Builder & Attestation Sealing
-  runTest('Proof Bundle Builder Seal & Independent Oracle Attestation', 'PROOFS', async () => {
+  // 12. Boolean oracle claims never produce a verified proof bundle.
+  runTest('Proof Bundle Builder Keeps Unauthenticated Oracle Evidence Partial', 'PROOFS', async () => {
     const z3Engine = Z3FormalProofEngine.getInstance();
     const z3Proof = await z3Engine.proveCatalogTheorem('THM-INDUCTIVE-TERMINATION-05');
     if (!z3Proof.proved || z3Proof.solver_result !== 'unsat') {
       throw new Error(`Z3 proof execution failed: ${z3Proof.explanation}`);
     }
 
+    const replayHash = computeSha256('cleanroom replay receipt');
     const builder = new ProofBundleBuilder('PB-TEST-SEAL', 'SUB-001', 'Test verifiable claim');
     builder
       .addTest('TEST-1', 'Basic assertion', true, 1.0)
       .addZ3Proof(z3Proof, true)
-      .addOracle('ORACLE-01', 'Test Witness', 'SIG_CHECK', true)
-      .addReplay('REPLAY-01', 'hash_a', 'hash_a');
+      .addOracle('ORACLE-01', 'Test Witness', 'CALLER_BOOLEAN_ONLY', true)
+      .addReplay('REPLAY-01', replayHash, replayHash)
+      .addSourceReference('https://example.invalid/source-proof-fixture');
     const sealed = builder.seal();
-    if (sealed.verification_status !== 'VERIFIED') {
-      throw new Error('Clean proof bundle failed to seal as VERIFIED');
+    if (sealed.verification_status === 'VERIFIED') {
+      throw new Error('Unauthenticated caller boolean sealed as VERIFIED');
     }
 
     const engine = ProofEngine.getInstance();
     const check = engine.verifyBundleIntegrity(sealed);
-    if (!check.verified) {
-      throw new Error(`Proof bundle failed integrity verification: ${check.reasons.join(', ')}`);
+    if (check.verified) {
+      throw new Error('Proof verifier accepted an oracle without trusted-key signature verification');
     }
+    let projectionRejected = false;
+    try { CrystalClearBox.projectCustomerEvidence(sealed); } catch { projectionRejected = true; }
+    if (!projectionRejected) throw new Error('Unauthenticated oracle bundle was projected to a customer');
   });
 
   // 13. Deterministic Replay Cleanroom Verification
