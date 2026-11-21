@@ -158,13 +158,14 @@ export class ProofBundleBuilder {
     );
   }
 
-  public addOracle(oracleId: string, name: string, method: string, verified: boolean): this {
+  public addOracle(oracleId: string, name: string, method: string, _verified: boolean): this {
+    // Caller-supplied booleans and self-computed digests do not authenticate an oracle.
     this.bundle.independent_oracles.push({
       oracle_id: oracleId,
       name,
       method,
-      attestation_hash: computeSha256(`${oracleId}:${name}:${verified}`),
-      verified
+      attestation_hash: computeSha256(`${oracleId}:${name}:UNVERIFIED_CALLER_ASSERTION`),
+      verified: false
     });
     return this;
   }
@@ -197,21 +198,21 @@ export class ProofBundleBuilder {
 
   public seal(): ProofBundleEntity {
     const allTestsPassed = this.bundle.tests.length > 0 && this.bundle.tests.every(t => t.passed);
-    
-    // There must be at least one genuine machine-checked formal or model proof that was proven
-    const machineCheckedProofs = this.bundle.formal_proofs.filter(f => 
+    const machineCheckedProofs = this.bundle.formal_proofs.filter(f =>
       f.checked && (f.classification === 'MACHINE_CHECKED_FORMAL_PROOF' || f.classification === 'MACHINE_CHECKED_MODEL_PROOF')
     );
     const hasMachineCheckedProof = machineCheckedProofs.length > 0;
-
-    // No non-claim formal proof can have failed
     const noFailedProofs = !this.bundle.formal_proofs.some(f => f.classification !== 'CLAIM_ONLY' && !f.checked);
-    
-    const oraclesAttested = this.bundle.independent_oracles.length > 0 && this.bundle.independent_oracles.every(o => o.verified);
-    const replaysMatched = this.bundle.replay_results.length > 0 && this.bundle.replay_results.every(r => r.status === 'MATCH');
+    const replaysMatched = this.bundle.replay_results.length > 0 && this.bundle.replay_results.every(r =>
+      r.status === 'MATCH' && /^[a-f0-9]{64}$/i.test(r.expected_hash) &&
+      r.expected_hash === r.observed_hash
+    );
 
-    if (allTestsPassed && hasMachineCheckedProof && noFailedProofs && oraclesAttested && replaysMatched) {
-      this.bundle.verification_status = 'VERIFIED';
+    // No trusted-key oracle signature verification exists in this legacy bundle schema.
+    // Therefore even locally passing checks can only produce PARTIAL, never VERIFIED.
+    if (allTestsPassed && hasMachineCheckedProof && noFailedProofs && replaysMatched) {
+      this.bundle.verification_status = 'PARTIAL';
+      this.bundle.limitations.push('Oracle authenticity is not verified against a deployment-pinned trusted key; this bundle cannot be marked VERIFIED.');
     } else {
       this.bundle.verification_status = 'FAIL';
     }

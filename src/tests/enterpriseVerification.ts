@@ -229,34 +229,39 @@ export async function runEnterpriseVerification() {
     const store = DurableStore.getInstance();
     const sol = store.getState().solutions['DH-S-001'];
     if (!sol) throw new Error('Preserved solution DH-S-001 missing from store');
-    if (sol.verification_status !== 'VERIFIED') throw new Error('DH-S-001 is not marked VERIFIED');
+    if (sol.verification_status !== 'PARTIAL') throw new Error('DH-S-001 must remain PARTIAL until a source-bound proof bundle verifies');
     if (!sol.reversibility_guaranteed) throw new Error('DH-S-001 must guarantee reversibility');
   });
 
-  // 12. Proof Bundle Builder & Attestation Sealing
-  runTest('Proof Bundle Builder Seal & Independent Oracle Attestation', 'PROOFS', async () => {
+  // 12. Boolean oracle claims never produce a verified proof bundle.
+  runTest('Proof Bundle Builder Keeps Unauthenticated Oracle Evidence Partial', 'PROOFS', async () => {
     const z3Engine = Z3FormalProofEngine.getInstance();
     const z3Proof = await z3Engine.proveCatalogTheorem('THM-INDUCTIVE-TERMINATION-05');
     if (!z3Proof.proved || z3Proof.solver_result !== 'unsat') {
       throw new Error(`Z3 proof execution failed: ${z3Proof.explanation}`);
     }
 
+    const replayHash = computeSha256('cleanroom replay receipt');
     const builder = new ProofBundleBuilder('PB-TEST-SEAL', 'SUB-001', 'Test verifiable claim');
     builder
       .addTest('TEST-1', 'Basic assertion', true, 1.0)
       .addZ3Proof(z3Proof, true)
-      .addOracle('ORACLE-01', 'Test Witness', 'SIG_CHECK', true)
-      .addReplay('REPLAY-01', 'hash_a', 'hash_a');
+      .addOracle('ORACLE-01', 'Test Witness', 'CALLER_BOOLEAN_ONLY', true)
+      .addReplay('REPLAY-01', replayHash, replayHash)
+      .addSourceReference('https://example.invalid/source-proof-fixture');
     const sealed = builder.seal();
-    if (sealed.verification_status !== 'VERIFIED') {
-      throw new Error('Clean proof bundle failed to seal as VERIFIED');
+    if (sealed.verification_status === 'VERIFIED') {
+      throw new Error('Unauthenticated caller boolean sealed as VERIFIED');
     }
 
     const engine = ProofEngine.getInstance();
     const check = engine.verifyBundleIntegrity(sealed);
-    if (!check.verified) {
-      throw new Error(`Proof bundle failed integrity verification: ${check.reasons.join(', ')}`);
+    if (check.verified) {
+      throw new Error('Proof verifier accepted an oracle without trusted-key signature verification');
     }
+    let projectionRejected = false;
+    try { CrystalClearBox.projectCustomerEvidence(sealed); } catch { projectionRejected = true; }
+    if (!projectionRejected) throw new Error('Unauthenticated oracle bundle was projected to a customer');
   });
 
   // 13. Deterministic Replay Cleanroom Verification
@@ -356,17 +361,29 @@ export async function runEnterpriseVerification() {
     }
   });
 
-  // 20. Crystal Clear Box Redacted Evidence Projection
-  runTest('Crystal Clear Box Redaction Preserves Verifiable Evidence', 'AUDIT', () => {
+  // 20. Crystal Clear Box never invents proof and fails closed on unsigned attestations.
+  runTest('Crystal Clear Box Rejects Missing and Untrusted Proof Bundles', 'AUDIT', () => {
     const engine = ProofEngine.getInstance();
-    const bundle = engine.getBundle('PB-DH-S-001');
-    if (!bundle) throw new Error('PB-DH-S-001 not found');
-    const customerView = CrystalClearBox.projectCustomerEvidence(bundle);
-    if (!customerView.proprietary_weights_redacted) throw new Error('Proprietary weights not marked redacted');
-    if (!customerView.internal_reasoning_redacted) throw new Error('Internal reasoning not marked redacted');
-    if (customerView.verification_verdict !== 'VERIFIED') throw new Error('Verification verdict missing or corrupt');
-    if (!customerView.public_audit_token || customerView.public_audit_token.length !== 64) {
-      throw new Error('Customer public audit token invalid');
+    let missingRejected = false;
+    try { CrystalClearBox.projectCustomerEvidence('DH-S-001'); } catch { missingRejected = true; }
+    if (!missingRejected) throw new Error('Missing DH-S-001 proof was converted into customer evidence');
+
+    for (const bundle of engine.getAllBundles()) {
+      const integrity = engine.verifyBundleIntegrity(bundle);
+      let projectionRejected = false;
+      try { CrystalClearBox.projectCustomerEvidence(bundle); } catch { projectionRejected = true; }
+      if (!integrity.verified && !projectionRejected) {
+        throw new Error(`Unverified proof bundle ${bundle.proof_id} was projected`);
+      }
+      if (integrity.verified) {
+        const view = CrystalClearBox.projectCustomerEvidence(bundle);
+        if (!view.proprietary_weights_redacted || !view.internal_reasoning_redacted) {
+          throw new Error('Private material was not marked redacted');
+        }
+        if (!/^[a-f0-9]{64}$/i.test(view.public_audit_token)) {
+          throw new Error('Public content digest is invalid');
+        }
+      }
     }
   });
 

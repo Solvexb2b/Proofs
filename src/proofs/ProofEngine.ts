@@ -1,84 +1,20 @@
 import { ProofBundleEntity, computeSha256 } from '../database/DatabaseSchema';
-import { ProofBundleBuilder } from './ProofBundle';
-import { NOPOTVerifier } from './NOPOTProof';
 import { DurableStore } from '../database/DurableStore';
+
+const SHA256_HEX = /^[a-f0-9]{64}$/i;
 
 export class ProofEngine {
   private static instance: ProofEngine | null = null;
   private bundles: Map<string, ProofBundleEntity> = new Map();
 
   private constructor() {
-    this.bootstrapDHS001();
+    const persisted = DurableStore.getInstance().getState().proof_bundles;
+    for (const [id, bundle] of Object.entries(persisted)) this.bundles.set(id, bundle);
   }
 
   public static getInstance(): ProofEngine {
-    if (!ProofEngine.instance) {
-      ProofEngine.instance = new ProofEngine();
-    }
+    if (!ProofEngine.instance) ProofEngine.instance = new ProofEngine();
     return ProofEngine.instance;
-  }
-
-  private bootstrapDHS001(): void {
-    const cert = NOPOTVerifier.verifyAlgorithmTermination(
-      'AchillesZenoConvergenceSum',
-      (remaining) => remaining - 1,
-      10,
-      100
-    );
-
-    const builder = new ProofBundleBuilder(
-      'PB-DH-S-001',
-      'DH-S-001',
-      'Bounded Zeno Geometric Convergence Algorithm reaches zero distance in exactly bounded O(log(1/epsilon)) steps.'
-    );
-
-    builder
-      .setImplementation('export function zenoStep(dist: number, eps: number) { return dist < eps ? 0 : dist / 2; }')
-      .addTest('TEST-ZENO-01', 'Convergence to epsilon within 64 iterations', true, 1.2)
-      .addTest('TEST-ZENO-02', 'Zero division guard invariant check', true, 0.4)
-      .addTest('TEST-ZENO-03', 'Deterministic float reproducibility across runs', true, 0.8)
-      .addFormalProof(
-        'Z3_SMT',
-        '[THM-ZENO-ARCHIMEDEAN-06] Archimedean Geometric Convergence Invariant (Real Analysis) - Claim: forall d in Real, d > 0 => d/2 < d AND d/2 > 0',
-        true,
-        'MACHINE_CHECKED_MODEL_PROOF',
-        {
-          engine: 'Microsoft Research Z3 Automated Theorem Prover',
-          version: 'Z3 5.2.0 (WebAssembly Native Kernel)',
-          solver_result: 'UNSAT (THM-ZENO-ARCHIMEDEAN-06)',
-          duration_ms: 65.27,
-          stdout: 'Strict metric decrease proved unsatisfiable for counterexample under real analysis.'
-        }
-      )
-      .addFormalProof(
-        'NOPOT',
-        'NOPOT Bounded Termination (AchillesZenoConvergenceSum) - Well-founded inductive decrease on Nat: V(s_{t+1}) < V(s_t)',
-        cert.termination_proved,
-        'MACHINE_CHECKED_MODEL_PROOF',
-        {
-          engine: 'Microsoft Research Z3 Automated Theorem Prover',
-          version: 'Z3 5.2.0 (WebAssembly Native Kernel)',
-          solver_result: 'UNSAT (THM-INDUCTIVE-TERMINATION-05)',
-          duration_ms: 497.12,
-          stdout: `Termination bounded to max ${cert.bounded_steps_upper_bound} steps, measured ${cert.actual_measured_steps} steps`
-        }
-      )
-      .addLean4Proof('src/proofs/lean/ZenoAchilles.lean')
-      .addLean4Proof('src/proofs/lean/NOPOTTermination.lean')
-      .addOracle('ORACLE-Z3-WITNESS', 'Microsoft Research Z3 SMT WASM Solver Attestor', 'SMT_SOLVER', true)
-      .addOracle('ORACLE-NOPOT-WITNESS', 'NOPOT Variant Decreasing Order Verifier', 'MATH_INSPECTION', true)
-      .addReplay('REPLAY-CLEANROOM-01', 'd8787c88ae821901', 'd8787c88ae821901')
-      .addEvidence('Log: 64 iterations executed without divergence.')
-      .addEvidence('Log: Binary footprint 128 bytes, 0 heap allocations.')
-      .addSourceReference('Aristotle Physics VI:9')
-      .addLimitation('Applies only to continuous metrics with standard real topology.');
-
-    const sealed = builder.seal();
-    this.bundles.set(sealed.proof_id, sealed);
-
-    const store = DurableStore.getInstance();
-    store.getState().proof_bundles[sealed.proof_id] = sealed;
-    store.persist();
   }
 
   public getBundle(proofId: string): ProofBundleEntity | undefined {
@@ -89,32 +25,68 @@ export class ProofEngine {
     return Array.from(this.bundles.values());
   }
 
+  public registerBundle(bundle: ProofBundleEntity): void {
+    if (!bundle || typeof bundle.proof_id !== 'string' || !bundle.proof_id.trim()) {
+      throw new Error('A proof bundle requires a non-empty proof_id.');
+    }
+    this.bundles.set(bundle.proof_id, bundle);
+    const store = DurableStore.getInstance();
+    store.getState().proof_bundles[bundle.proof_id] = bundle;
+    store.persist();
+  }
+
   public verifyBundleIntegrity(bundle: ProofBundleEntity): { verified: boolean; reasons: string[] } {
     const reasons: string[] = [];
-    if (!bundle.tests || bundle.tests.length === 0) reasons.push('Zero empirical tests provided');
-    if (bundle.tests.some(t => !t.passed)) reasons.push('One or more empirical tests failed');
-    if (!bundle.formal_proofs || bundle.formal_proofs.length === 0) reasons.push('Zero formal proofs provided');
-    
-    // Genuine machine-checked proof required: must have at least one machine-checked formal/model proof
-    const machineCheckedProofs = bundle.formal_proofs.filter(f => 
-      f.checked && (f.classification === 'MACHINE_CHECKED_FORMAL_PROOF' || f.classification === 'MACHINE_CHECKED_MODEL_PROOF')
-    );
-    if (machineCheckedProofs.length === 0) {
-      reasons.push('No genuine machine-checked formal or model proofs present (all claims unverified or claim-only)');
+    if (!bundle || typeof bundle !== 'object') {
+      return { verified: false, reasons: ['Missing proof bundle'] };
+    }
+    if (!bundle.proof_id || !bundle.subject_id) reasons.push('Missing proof or subject identity');
+    if (!bundle.claim || typeof bundle.claim !== 'string') reasons.push('Missing claim text');
+    if (!SHA256_HEX.test(bundle.claim_hash || '') || bundle.claim_hash !== computeSha256(bundle.claim || '')) {
+      reasons.push('Claim hash is missing, malformed, or does not match claim text');
+    }
+    if (!Array.isArray(bundle.source_references) || bundle.source_references.length === 0 ||
+        bundle.source_references.some(ref => typeof ref !== 'string' || !ref.trim())) {
+      reasons.push('Missing source-bound references');
+    }
+    for (const [name, value] of [['implementation', bundle.implementation_hash], ['environment', bundle.environment_hash], ['dependency', bundle.dependency_hash]] as const) {
+      if (!SHA256_HEX.test(value || '')) reasons.push(`Invalid ${name} SHA-256`);
+    }
+    if (!Number.isFinite(bundle.timestamp) || bundle.timestamp <= 0) reasons.push('Invalid proof timestamp');
+    if (!bundle.verifier_identity || !bundle.verifier_identity.trim()) reasons.push('Missing verifier identity');
+
+    if (!Array.isArray(bundle.tests) || bundle.tests.length === 0) reasons.push('Zero empirical tests provided');
+    else for (const test of bundle.tests) {
+      if (!test.passed) reasons.push('One or more empirical tests failed');
+      if (!SHA256_HEX.test(test.receipt_hash || '')) reasons.push('Empirical test receipt hash missing or invalid');
     }
 
-    if (bundle.formal_proofs.some(f => f.classification !== 'CLAIM_ONLY' && !f.checked)) {
-      reasons.push('One or more non-claim formal proof terms failed verification');
+    if (!Array.isArray(bundle.formal_proofs) || bundle.formal_proofs.length === 0) reasons.push('Zero machine-checked formal proofs');
+    else for (const proof of bundle.formal_proofs) {
+      if (!proof.checked) reasons.push('One or more formal proof terms failed verification');
+      if (!SHA256_HEX.test(proof.proof_term_hash || '')) reasons.push('Formal proof term hash missing or invalid');
+      if (!proof.system?.trim() || !proof.specification?.trim()) reasons.push('Formal proof system or specification missing');
     }
 
-    if (!bundle.independent_oracles || bundle.independent_oracles.length === 0) reasons.push('Missing independent oracle attestation');
-    if (bundle.independent_oracles.some(o => !o.verified)) reasons.push('One or more oracle attestations rejected');
-    if (!bundle.replay_results || bundle.replay_results.length === 0) reasons.push('Missing deterministic replay runs');
-    if (bundle.replay_results.some(r => r.status !== 'MATCH')) reasons.push('Replay trace divergence observed');
+    if (!Array.isArray(bundle.independent_oracles) || bundle.independent_oracles.length === 0) reasons.push('Missing independent oracle attestation');
+    else {
+      for (const oracle of bundle.independent_oracles) {
+        if (!oracle.verified) reasons.push('One or more oracle attestations rejected');
+        if (!SHA256_HEX.test(oracle.attestation_hash || '')) reasons.push('Oracle attestation hash missing or invalid');
+        if (!oracle.oracle_id?.trim() || !oracle.name?.trim() || !oracle.method?.trim()) reasons.push('Oracle identity or method missing');
+      }
+      reasons.push('Oracle signatures require verification against configured trusted keys');
+    }
 
-    return {
-      verified: reasons.length === 0,
-      reasons
-    };
+    if (!Array.isArray(bundle.replay_results) || bundle.replay_results.length === 0) reasons.push('Missing deterministic replay runs');
+    else for (const replay of bundle.replay_results) {
+      if (replay.status !== 'MATCH' || !SHA256_HEX.test(replay.expected_hash || '') ||
+          !SHA256_HEX.test(replay.observed_hash || '') || replay.expected_hash !== replay.observed_hash) {
+        reasons.push('Replay trace is missing, malformed, or divergent');
+        break;
+      }
+    }
+    if (bundle.verification_status !== 'VERIFIED') reasons.push('Bundle status is not VERIFIED');
+    return { verified: reasons.length === 0, reasons: Array.from(new Set(reasons)) };
   }
 }
