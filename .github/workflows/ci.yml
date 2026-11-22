@@ -33,7 +33,10 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          npm ci --prefer-offline --no-audit
+          # Vite 8 declares an optional esbuild peer >=0.27 while this
+          # repo intentionally pins esbuild 0.25 for its direct tooling.
+          # Keep npm ci lockfile-exact and ignore only that optional peer check.
+          npm ci --prefer-offline --no-audit --legacy-peer-deps
 
       - name: Validate TypeScript & Linter Integrity
         run: |
